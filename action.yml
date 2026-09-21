@@ -86,18 +86,24 @@ runs:
         # warnings, which is the failure this action exists to prevent.
         git worktree add --detach --quiet "$RUNNER_TEMP/base-tree" "$BASE_SHA"
 
+        # --no-ensure-latest because a binstub may inject --ensure-latest, which
+        # exits 5 purely because a newer Brakeman exists. That is a version nag,
+        # not a failed scan, and it must not be read as one.
         set +e
         $BRAKEMAN_COMMAND --format json --output "$RUNNER_TEMP/brakeman-base.json" \
-          --no-exit-on-warn --no-exit-on-error --quiet "$RUNNER_TEMP/base-tree"
+          --no-exit-on-warn --no-exit-on-error --no-ensure-latest \
+          --quiet "$RUNNER_TEMP/base-tree"
         code=$?
         set -e
 
         git worktree remove --force "$RUNNER_TEMP/base-tree"
 
-        # A baseline we cannot trust would silently promote every pre-existing
-        # warning to "new", so refuse to guess.
-        if [ "$code" -gt 0 ] || ! jq empty "$RUNNER_TEMP/brakeman-base.json" 2>/dev/null; then
-          echo "::error::Brakeman could not scan the base commit (exit $code)"
+        # Judged on the report rather than the exit code: with warnings and
+        # errors already neutralised, a parseable report means the scan ran. A
+        # baseline we cannot trust would silently promote every pre-existing
+        # warning to "new", so refuse to guess when there is no report.
+        if ! jq empty "$RUNNER_TEMP/brakeman-base.json" 2>/dev/null; then
+          echo "::error::Brakeman produced no usable report for the base commit (exit $code)"
           exit 2
         fi
 
@@ -110,7 +116,7 @@ runs:
         set -euo pipefail
 
         args=(--format json --output "$RUNNER_TEMP/brakeman-head.json"
-              --no-exit-on-warn --no-exit-on-error --quiet)
+              --no-exit-on-warn --no-exit-on-error --no-ensure-latest --quiet)
         if [ -f "$RUNNER_TEMP/brakeman-base.json" ]; then
           args+=(--compare "$RUNNER_TEMP/brakeman-base.json")
         fi
@@ -120,8 +126,8 @@ runs:
         code=$?
         set -e
 
-        if [ "$code" -gt 0 ] || ! jq empty "$RUNNER_TEMP/brakeman-head.json" 2>/dev/null; then
-          echo "::error::Brakeman failed on this branch (exit $code)"
+        if ! jq empty "$RUNNER_TEMP/brakeman-head.json" 2>/dev/null; then
+          echo "::error::Brakeman produced no usable report for this branch (exit $code)"
           cat "$RUNNER_TEMP/brakeman-head.json" 2>/dev/null || true
           exit 2
         fi
