@@ -1,0 +1,155 @@
+name: Brakeman (new warnings only)
+description: >-
+  Run Brakeman against this branch and the commit it forked from, and fail only
+  on warnings the branch itself introduced. Warnings that already existed do not
+  fail the check, so upgrading Brakeman — which routinely adds checks that flag
+  long-standing code — cannot turn every unrelated pull request red. Pair with a
+  scheduled workflow that scans the whole application.
+
+inputs:
+  base-ref:
+    description: Branch to compare against. Defaults to the pull request base, then main.
+    required: false
+    default: ""
+  brakeman-command:
+    description: How to invoke Brakeman.
+    required: false
+    default: bundle exec brakeman
+
+outputs:
+  new-count:
+    description: Number of warnings this branch introduced.
+    value: ${{ steps.compare.outputs.new-count }}
+  fixed-count:
+    description: Number of warnings this branch removed.
+    value: ${{ steps.compare.outputs.fixed-count }}
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve base commit
+      id: base
+      shell: bash
+      env:
+        INPUT_BASE_REF: ${{ inputs.base-ref }}
+        PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
+      run: |
+        set -euo pipefail
+        ref="${INPUT_BASE_REF:-}"
+        [ -n "$ref" ] || ref="${PR_BASE_REF:-}"
+        [ -n "$ref" ] || ref="main"
+
+        # The merge base needs the fork point, which a shallow clone hides as
+        # soon as the base branch moves past it. That reads as "no merge base"
+        # rather than as an error, so unshallow before resolving anything.
+        if [ "$(git rev-parse --is-shallow-repository)" = "true" ]; then
+          git fetch --unshallow --no-tags origin "$ref"
+        else
+          git fetch --no-tags origin "$ref"
+        fi
+
+        if ! base_sha="$(git merge-base "origin/$ref" HEAD)"; then
+          echo "::error::No merge base with origin/$ref. Check out with fetch-depth: 0."
+          exit 2
+        fi
+
+        # On a push to the base branch itself the merge base is HEAD, which
+        # would compare the commit to itself and pass unconditionally. Step
+        # back one commit so a merge that introduces a problem still fails.
+        if [ "$base_sha" = "$(git rev-parse HEAD)" ]; then
+          if ! base_sha="$(git rev-parse HEAD~1 2>/dev/null)"; then
+            echo "No parent commit to compare against; treating everything as pre-existing."
+            base_sha=""
+          fi
+        fi
+
+        echo "base_sha=$base_sha" >> "$GITHUB_OUTPUT"
+        echo "Comparing against ${base_sha:-<nothing>}"
+
+    - name: Scan the base commit
+      shell: bash
+      env:
+        BASE_SHA: ${{ steps.base.outputs.base_sha }}
+        BRAKEMAN_COMMAND: ${{ inputs.brakeman-command }}
+      run: |
+        set -euo pipefail
+        rm -f "$RUNNER_TEMP/brakeman-base.json"
+
+        if [ -z "$BASE_SHA" ]; then
+          echo "No base commit; every warning will count as new."
+          exit 0
+        fi
+
+        # A worktree rather than a checkout, so the branch's bundle stays in
+        # place and the SAME Brakeman build scans both trees. Scanning with two
+        # different versions is what makes an upgrade look like a wave of new
+        # warnings, which is the failure this action exists to prevent.
+        git worktree add --detach --quiet "$RUNNER_TEMP/base-tree" "$BASE_SHA"
+
+        set +e
+        $BRAKEMAN_COMMAND --format json --output "$RUNNER_TEMP/brakeman-base.json" \
+          --no-exit-on-warn --no-exit-on-error --quiet "$RUNNER_TEMP/base-tree"
+        code=$?
+        set -e
+
+        git worktree remove --force "$RUNNER_TEMP/base-tree"
+
+        # A baseline we cannot trust would silently promote every pre-existing
+        # warning to "new", so refuse to guess.
+        if [ "$code" -gt 0 ] || ! jq empty "$RUNNER_TEMP/brakeman-base.json" 2>/dev/null; then
+          echo "::error::Brakeman could not scan the base commit (exit $code)"
+          exit 2
+        fi
+
+    - name: Compare against the base commit
+      id: compare
+      shell: bash
+      env:
+        BRAKEMAN_COMMAND: ${{ inputs.brakeman-command }}
+      run: |
+        set -euo pipefail
+
+        args=(--format json --output "$RUNNER_TEMP/brakeman-head.json"
+              --no-exit-on-warn --no-exit-on-error --quiet)
+        if [ -f "$RUNNER_TEMP/brakeman-base.json" ]; then
+          args+=(--compare "$RUNNER_TEMP/brakeman-base.json")
+        fi
+
+        set +e
+        $BRAKEMAN_COMMAND "${args[@]}" .
+        code=$?
+        set -e
+
+        if [ "$code" -gt 0 ] || ! jq empty "$RUNNER_TEMP/brakeman-head.json" 2>/dev/null; then
+          echo "::error::Brakeman failed on this branch (exit $code)"
+          cat "$RUNNER_TEMP/brakeman-head.json" 2>/dev/null || true
+          exit 2
+        fi
+
+        # With --compare the report is {new, fixed, obsolete}; without it (no
+        # base commit) it is a normal report and every warning counts as new.
+        if jq -e 'has("new")' "$RUNNER_TEMP/brakeman-head.json" >/dev/null; then
+          new="$(jq '[.new[]?]' "$RUNNER_TEMP/brakeman-head.json")"
+          n_fixed="$(jq '[.fixed[]?] | length' "$RUNNER_TEMP/brakeman-head.json")"
+        else
+          new="$(jq '[.warnings[]?]' "$RUNNER_TEMP/brakeman-head.json")"
+          n_fixed=0
+        fi
+
+        n_new="$(jq 'length' <<< "$new")"
+        echo "new-count=$n_new" >> "$GITHUB_OUTPUT"
+        echo "fixed-count=$n_fixed" >> "$GITHUB_OUTPUT"
+
+        [ "$n_fixed" -eq 0 ] || echo "This branch removes $n_fixed existing warning(s)."
+
+        if [ "$n_new" -gt 0 ]; then
+          {
+            echo "### $n_new Brakeman warning(s) introduced by this branch"
+            echo
+            jq -r '.[] | "- **\(.warning_type)** (\(.confidence) confidence) in `\(.file):\(.line // "?")`\n  - \(.message)"' <<< "$new"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "::error::This branch introduces $n_new new Brakeman warning(s)."
+          exit 1
+        fi
+
+        echo "No new Brakeman warnings."
