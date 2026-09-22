@@ -86,13 +86,13 @@ runs:
         # warnings, which is the failure this action exists to prevent.
         git worktree add --detach --quiet "$RUNNER_TEMP/base-tree" "$BASE_SHA"
 
-        # --no-ensure-latest because a binstub may inject --ensure-latest, which
-        # exits 5 purely because a newer Brakeman exists. That is a version nag,
-        # not a failed scan, and it must not be read as one.
+        # Brakeman has no negated form of --ensure-latest, and a binstub may
+        # inject it. It exits 5 purely because a newer release exists -- a
+        # version nag, not a failed scan -- and writes the report regardless,
+        # which is why success is judged on the report rather than the exit code.
         set +e
         $BRAKEMAN_COMMAND --format json --output "$RUNNER_TEMP/brakeman-base.json" \
-          --no-exit-on-warn --no-exit-on-error --no-ensure-latest \
-          --quiet "$RUNNER_TEMP/base-tree"
+          --no-exit-on-warn --no-exit-on-error --quiet "$RUNNER_TEMP/base-tree"
         code=$?
         set -e
 
@@ -116,7 +116,7 @@ runs:
         set -euo pipefail
 
         args=(--format json --output "$RUNNER_TEMP/brakeman-head.json"
-              --no-exit-on-warn --no-exit-on-error --no-ensure-latest --quiet)
+              --no-exit-on-warn --no-exit-on-error --quiet)
         if [ -f "$RUNNER_TEMP/brakeman-base.json" ]; then
           args+=(--compare "$RUNNER_TEMP/brakeman-base.json")
         fi
