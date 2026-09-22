@@ -86,10 +86,11 @@ runs:
         # warnings, which is the failure this action exists to prevent.
         git worktree add --detach --quiet "$RUNNER_TEMP/base-tree" "$BASE_SHA"
 
-        # Brakeman has no negated form of --ensure-latest, and a binstub may
-        # inject it. It exits 5 purely because a newer release exists -- a
-        # version nag, not a failed scan -- and writes the report regardless,
-        # which is why success is judged on the report rather than the exit code.
+        # Pass a command that does not carry --ensure-latest. Brakeman has no
+        # negated form, and when the flag fires it exits 5 *before* writing a
+        # report, so there is nothing to compare against. A binstub that injects
+        # it (`bin/brakeman` in some apps) must therefore be bypassed with
+        # `bundle exec brakeman` via the brakeman-command input.
         set +e
         $BRAKEMAN_COMMAND --format json --output "$RUNNER_TEMP/brakeman-base.json" \
           --no-exit-on-warn --no-exit-on-error --quiet "$RUNNER_TEMP/base-tree"

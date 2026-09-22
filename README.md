@@ -41,6 +41,22 @@ what surfaces warnings nobody introduced. See [Companion workflow](#companion-wo
 If Brakeman cannot produce a trustworthy baseline the step fails with exit 2
 rather than treating every pre-existing warning as new.
 
+## A binstub that injects `--ensure-latest`
+
+Some applications ship a `bin/brakeman` that prepends `--ensure-latest`. When a
+newer Brakeman exists that exits 5 **before writing a report**, so there is
+nothing to compare against and this action fails. Brakeman offers no negated
+form of the flag, so pass a command that bypasses the binstub:
+
+```yaml
+- uses: ten-thousand-hammers/brakeman-changed@v1
+  with:
+    brakeman-command: bundle exec brakeman
+```
+
+That is the default. Keep the version check in a scheduled workflow instead,
+where being out of date is reported rather than failing pull requests.
+
 ## Inputs
 
 | Name | Default | Description |
